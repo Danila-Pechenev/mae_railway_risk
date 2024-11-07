@@ -1,0 +1,3 @@
+*.pth
+output_dir
+finetune*
