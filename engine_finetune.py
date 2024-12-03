@@ -20,6 +20,7 @@ from timm.utils import accuracy
 
 import util.misc as misc
 import util.lr_sched as lr_sched
+from sklearn.metrics import confusion_matrix
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
@@ -102,6 +103,10 @@ def evaluate(data_loader, model, device):
     metric_logger = misc.MetricLogger(delimiter="  ")
     header = 'Test:'
 
+    # Lists to store targets and predictions for confusion matrix
+    all_preds = []
+    all_targets = []
+
     # switch to evaluation mode
     model.eval()
 
@@ -116,6 +121,12 @@ def evaluate(data_loader, model, device):
             output = model(images)
             loss = criterion(output, target)
 
+        # Get the index of the max log-probability (predicted class index)
+        _, preds = torch.max(output, 1)
+        # Store predictions and targets to compute confusion matrix later
+        all_preds.extend(preds.view(-1).cpu().numpy())
+        all_targets.extend(target.view(-1).cpu().numpy())
+        
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
 
         batch_size = images.shape[0]
@@ -127,4 +138,7 @@ def evaluate(data_loader, model, device):
     print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
           .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
 
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    conf_matrix = confusion_matrix(all_targets,all_preds)
+    results = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    results['conf_matrix'] = conf_matrix
+    return results

@@ -301,7 +301,8 @@ def main(args):
 
     if args.eval:
         test_stats = evaluate(data_loader_val, model, device)
-        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}% \n")
+        print("Confusion Matrix:\n",test_stats['conf_matrix'])
         exit(0)
 
     print(f"Start training for {args.epochs} epochs")
