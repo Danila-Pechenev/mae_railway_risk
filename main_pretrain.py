@@ -21,6 +21,9 @@ import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
+from torch.utils.data import Dataset
+from PIL import Image
+from torchvision.transforms.functional import to_tensor
 
 import timm
 
@@ -33,6 +36,81 @@ from util.misc import NativeScalerWithGradNormCount as NativeScaler
 import models_mae
 
 from engine_pretrain import train_one_epoch
+
+def add_weight_decay(model, weight_decay, skip_list=()):
+    decay = []
+    no_decay = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(nd in name for nd in skip_list):
+            no_decay.append(param)
+        else:
+            decay.append(param)
+    return [
+        {'params': no_decay, 'weight_decay': 0.},
+        {'params': decay, 'weight_decay': weight_decay},
+    ]
+
+
+class CustomDataset(Dataset):
+    def __init__(self, image_dir, mask_dir=None, transform=None):
+        self.image_dir = image_dir
+        self.mask_dir = mask_dir
+        self.transform = transform
+
+        # Collect all image paths from subdirectories
+        self.image_paths = []
+        for root, _, files in os.walk(image_dir):
+            for f in files:
+                if f.endswith(('.jpg', '.jpeg', '.png', '.bmp')):
+                    self.image_paths.append(os.path.join(root, f))
+        self.image_paths = sorted(self.image_paths)
+
+        # Collect matching mask paths if provided
+        if mask_dir:
+            self.mask_paths = {
+                os.path.splitext(f)[0]: os.path.join(mask_dir, f)
+                for root, _, files in os.walk(mask_dir) for f in files
+                if f.endswith(('.jpg', '.jpeg', '.png', '.bmp'))
+            }
+        else:
+            self.mask_paths = None
+
+        print(f"Found {len(self.image_paths)} images.")
+        if self.mask_paths:
+            print(f"Found {len(self.mask_paths)} masks.")
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        # Load image
+        image_path = self.image_paths[idx]
+        image = Image.open(image_path).convert('RGB')
+
+        # Load corresponding mask
+        mask = None
+        if self.mask_paths:
+            mask_key = os.path.splitext(os.path.basename(image_path))[0]
+            mask_path = self.mask_paths.get(mask_key)
+            if mask_path:
+                mask = Image.open(mask_path).convert('L')
+
+        # Apply transforms
+        if self.transform:
+            image = self.transform(image)
+        else:
+            image = to_tensor(image)  # Convert to tensor if no transform is applied
+            
+        if mask:
+            mask = to_tensor(mask)  # Convert mask to tensor but skip Normalize
+            #mask = mask.repeat(3, 1, 1)  # Repeat channels to match image shape
+        else:
+            mask = torch.zeros((1, image.shape[1], image.shape[2]))  # Default zero mask
+
+        return image, mask
+
 
 
 def get_args_parser():
@@ -74,6 +152,8 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
+    parser.add_argument('--mask_path', default=None, type=str,
+                        help='masks path (optional)')
 
     parser.add_argument('--output_dir', default='./output_dir',
                         help='path where to save, empty for no saving')
@@ -125,7 +205,15 @@ def main(args):
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+
+    # Original dataset_train initialization (commented out)
+    #dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+
+    dataset_train = CustomDataset(
+        image_dir=os.path.join(args.data_path, 'train'),
+        mask_dir=args.mask_path,
+        transform=transform_train
+    )
     print(dataset_train)
 
     if True:  # args.distributed:
@@ -151,7 +239,8 @@ def main(args):
         pin_memory=args.pin_mem,
         drop_last=True,
     )
-    
+    print(f"Number of batches : {len(data_loader_train)}")
+
     # define the model
     model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
 
@@ -161,7 +250,7 @@ def main(args):
     print("Model = %s" % str(model_without_ddp))
 
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
-    
+
     if args.lr is None:  # only base_lr is specified
         args.lr = args.blr * eff_batch_size / 256
 
@@ -174,9 +263,10 @@ def main(args):
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
-    
+
     # following timm: set wd as 0 for bias and norm layers
-    param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
+    param_groups = add_weight_decay(model_without_ddp, args.weight_decay)
+
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(optimizer)
     loss_scaler = NativeScaler()
@@ -200,7 +290,7 @@ def main(args):
                 loss_scaler=loss_scaler, epoch=epoch)
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                        'epoch': epoch,}
+                     'epoch': epoch,}
 
         if args.output_dir and misc.is_main_process():
             if log_writer is not None:
