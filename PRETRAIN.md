@@ -22,3 +22,9 @@ python submitit_pretrain.py \
 - Training time is ~42h in 64 V100 GPUs (800 epochs).
 
 To train ViT-Base or ViT-Huge, set `--model mae_vit_base_patch16` or `--model mae_vit_huge_patch14`.
+
+## Pre-training command with main_pretrain.py
+
+python main_pretrain.py --model mae_vit_base_patch16 --batch_size 16 --epochs 500 --data_path ../../data/images/2vsall_bl_2/ --output_dir output_dir/pretrain/test_changes_maskjanvier1
+
+--mask_path ../../data/masks/distance/original/ 

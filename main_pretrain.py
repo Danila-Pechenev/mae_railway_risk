@@ -15,7 +15,7 @@ import numpy as np
 import os
 import time
 from pathlib import Path
-
+import random
 import torch
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
@@ -30,6 +30,7 @@ import timm
 #assert timm.__version__ == "0.3.2"  # version check
 import timm.optim.optim_factory as optim_factory
 
+import albumentations as A
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
@@ -51,13 +52,15 @@ def add_weight_decay(model, weight_decay, skip_list=()):
         {'params': no_decay, 'weight_decay': 0.},
         {'params': decay, 'weight_decay': weight_decay},
     ]
-
-
+        
 class CustomDataset(Dataset):
-    def __init__(self, image_dir, mask_dir=None, transform=None):
+    # Return an image of size 224,224 
+    # and a mask of size 224,224
+    def __init__(self, image_dir, mask_dir=None, transform=None, normalize = None):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
         self.transform = transform
+        self.normalize = normalize
 
         # Collect all image paths from subdirectories
         self.image_paths = []
@@ -69,6 +72,7 @@ class CustomDataset(Dataset):
 
         # Collect matching mask paths if provided
         if mask_dir:
+            print("Mask are used and loaded\n")
             self.mask_paths = {
                 os.path.splitext(f)[0]: os.path.join(mask_dir, f)
                 for root, _, files in os.walk(mask_dir) for f in files
@@ -77,6 +81,7 @@ class CustomDataset(Dataset):
         else:
             self.mask_paths = None
 
+        #Print findings
         print(f"Found {len(self.image_paths)} images.")
         if self.mask_paths:
             print(f"Found {len(self.mask_paths)} masks.")
@@ -90,25 +95,42 @@ class CustomDataset(Dataset):
         image = Image.open(image_path).convert('RGB')
 
         # Load corresponding mask
+        image_data = None
         mask = None
+        
+        #If a mask is given load it
         if self.mask_paths:
             mask_key = os.path.splitext(os.path.basename(image_path))[0]
             mask_path = self.mask_paths.get(mask_key)
             if mask_path:
                 mask = Image.open(mask_path).convert('L')
-
+                mask = mask.resize((224,224), Image.NEAREST)
+        
         # Apply transforms
         if self.transform:
-            image = self.transform(image)
+            image_data = self.transform(image=np.array(image))
+            image = to_tensor(Image.fromarray(image_data['image']))
+            #Image.fromarray(image_data['image']).show(title="Image")#Vizualise image
         else:
             image = to_tensor(image)  # Convert to tensor if no transform is applied
-            
-        if mask:
-            mask = to_tensor(mask)  # Convert mask to tensor but skip Normalize
+
+        #If a mask is found and transform is set
+        if mask and self.transform:
+            mask_data = A.ReplayCompose.replay(image_data['replay'],image=np.array(mask))
+            mask = to_tensor(Image.fromarray(mask_data['image']))  # Convert mask to tensor but skip Normalize
             #mask = mask.repeat(3, 1, 1)  # Repeat channels to match image shape
+            #Image.fromarray(mask_data['image']).show(title="Mask")#Vizualise mask
+            #time.sleep(1000)
         else:
             mask = torch.zeros((1, image.shape[1], image.shape[2]))  # Default zero mask
 
+        #Normalize only the image
+        if self.normalize:
+            image = self.normalize(image)
+
+        #here the returning shape are :
+        # image : channel,size,size
+        # mask : 1,size,size
         return image, mask
 
 
@@ -167,7 +189,7 @@ def get_args_parser():
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
-    parser.add_argument('--num_workers', default=10, type=int)
+    parser.add_argument('--num_workers', default=1, type=int)
     parser.add_argument('--pin_mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
@@ -200,21 +222,30 @@ def main(args):
     cudnn.benchmark = True
 
     # simple augmentation
-    transform_train = transforms.Compose([
-            transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-
+    #transform_train = transforms.Compose([
+    #        transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
+    #        transforms.RandomHorizontalFlip(),
+    #        transforms.ToTensor(),
+    #        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    
+    #augmentation with albumentations
+    #albumentations allow to compose tranforms that can be recorded whom will impact multiple inputs (when random crop and random flip)
+    transform_train = A.ReplayCompose([
+        A.RandomResizedCrop((args.input_size,args.input_size), scale=(0.2, 1.0), interpolation=3),
+        A.HorizontalFlip()])
+    
+    normalize_transform = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    
     # Original dataset_train initialization (commented out)
     #dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
 
     dataset_train = CustomDataset(
         image_dir=os.path.join(args.data_path, 'train'),
         mask_dir=args.mask_path,
-        transform=transform_train
+        transform=transform_train,
+        normalize = normalize_transform
     )
-    print(dataset_train)
+    #print(dataset_train)
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()

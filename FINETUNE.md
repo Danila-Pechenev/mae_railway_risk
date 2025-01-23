@@ -175,3 +175,6 @@ This PT/GPU code produces *better* results for ViT-L/H (see the table below). Th
 <td align="center">77.2</td>
 </tr>
 </tbody></table>
+
+### Evaluate model with the confusion matrix 
+python main_finetune.py --eval --resume finetune/finetune_railsem4_balanced_10000/best_model.pth --model vit_base_patch16 --batch_size 16 --data_path ../../data/images/2vsall_bl_2/ --cls_token --nb_classes 2

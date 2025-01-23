@@ -13,12 +13,39 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from timm.models.vision_transformer import PatchEmbed, Block
 
+import matplotlib.pyplot as plt
 from util.pos_embed import get_2d_sincos_pos_embed
 import time
 
+
+def visualize_patch_mask(mask, title="Patch Mask"):
+    """
+    Visualize a patch-level mask (e.g., 14x14) as an image.
+    Args:
+        mask: Tensor of shape [L], [B, L], or [H, W] (sequence length or patch grid).
+        title: Title for the visualization.
+    """
+    # If mask is [B, L], select the first sample
+    if len(mask.shape) == 2:  # [B, L]
+        mask = mask[0]  # Use the first batch
+
+    # Reshape mask to 2D if needed
+    if len(mask.shape) == 1:  # [L]
+        num_patches = int(mask.shape[0]**0.5)  # Assuming square patches
+        mask = mask.reshape(num_patches, num_patches)  # Reshape to [H, W]
+
+    # Convert mask to numpy for plotting
+    mask = mask.cpu().numpy()  # Ensure it's on CPU
+
+    # Plot the mask
+    plt.figure(figsize=(5, 5))
+    plt.imshow(mask, cmap='gray')
+    plt.title(title)
+    plt.axis('off')
+    plt.show()
 
 class MaskedAutoencoderViT(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone
@@ -123,53 +150,56 @@ class MaskedAutoencoderViT(nn.Module):
 
     def random_masking(self, x, mask, mask_ratio):
         """
-        Perform per-sample random masking by per-sample shuffling.
-        Per-sample shuffling is done by argsort random noise.
-        x: [N, L, D], sequence
+        Perform per-sample masking influenced by the mask.
+        Ensure the number of patches kept aligns with mask_ratio.
         """
-        N, L, D = x.shape  # batch, length, dim
+        N, L, D = x.shape  # batch size, sequence length, embedding dimension
+        num_patches = int(L**0.5)  # Assuming square grid of patches
+
+        # Step 1: Convert mask to patch level
         if mask is not None:
-            # Use the provided mask
-            #For now do the same thing
-            len_keep = int(L * (1 - mask_ratio))
+            mask = F.interpolate(mask, size=(num_patches, num_patches), mode='nearest')  # Resize to patch level
+            mask = mask.squeeze(1).flatten(1)  # [B, L]
+            mask_counts = mask.sum(dim=1)  # Total masked pixels per sample
+            print(mask_counts)
+        else:
+            mask_counts = torch.zeros(N, device=x.device)
 
-            noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+        # Step 2: Determine number of patches to keep
+        len_keep = int(L * (1 - mask_ratio))  # Fixed number of patches to keep
 
-            # sort noise for each sample
-            ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
-            ids_restore = torch.argsort(ids_shuffle, dim=1)
+        # Step 3: Adjust probabilities based on mask
+        noise = torch.rand(N, L, device=x.device)  # Random noise for all patches
 
-            # keep the first subset
-            ids_keep = ids_shuffle[:, :len_keep]
-            x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+        for i in range (noise.shape[0]):
+            if mask_counts[i]>1:
+                # Increase noise for patches with more masked pixels (higher chance to mask)
+                patch_probs = mask[i] / mask[i].max(dim=1, keepdim=True)[0]  # Normalize mask values to [0, 1]
+                noise[i] = noise[i] + patch_probs  # Adjust noise
+                # Normalize the adjusted noise for the current sample
+                noise[i] = (noise[i] - noise[i].min()) / (noise[i].max() - noise[i].min() + 1e-6)  # Normalize to [0, 1]
 
-            # generate the binary mask: 0 is keep, 1 is remove
-            mask = torch.ones([N, L], device=x.device)
-            mask[:, :len_keep] = 0
-            # unshuffle to get the binary mask
-            mask = torch.gather(mask, dim=1, index=ids_restore)
+            print(noise.shape)
+            visualize_patch_mask(noise[i])
+        time.sleep(100000)
+        # Step 4: Sort and select patches
+        ids_shuffle = torch.argsort(noise, dim=1)  # Sort noise (lower values = keep)
+        ids_restore = torch.argsort(ids_shuffle, dim=1)  # Restore order after masking
+        ids_keep = ids_shuffle[:, :len_keep]  # Select indices of patches to keep
 
-            return x_masked, mask, ids_restore
-        # Perform default random masking
-        len_keep = int(L * (1 - mask_ratio))
+        # Step 5: Gather masked patches
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, D))
 
-        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+        # Step 6: Generate binary mask
+        binary_mask = torch.ones([N, L], device=x.device)  # All masked by default
+        binary_mask.scatter_(1, ids_keep, 0)  # Mark kept patches as 0 (unmasked)
 
-        # sort noise for each sample
-        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
-        ids_restore = torch.argsort(ids_shuffle, dim=1)
-
-        # keep the first subset
-        ids_keep = ids_shuffle[:, :len_keep]
-        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
-
-        # generate the binary mask: 0 is keep, 1 is remove
-        mask = torch.ones([N, L], device=x.device)
-        mask[:, :len_keep] = 0
-        # unshuffle to get the binary mask
-        mask = torch.gather(mask, dim=1, index=ids_restore)
-
-        return x_masked, mask, ids_restore
+        for i in binary_mask:
+            visualize_patch_mask(i)
+        
+        time.sleep(10000)
+        return x_masked, binary_mask, ids_restore
+        
 
 
     def forward_encoder(self, x, mask=None, mask_ratio=0.75):
