@@ -16,6 +16,9 @@ import torch
 
 import util.misc as misc
 import util.lr_sched as lr_sched
+from skimage.metrics import structural_similarity as ssim
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
 
 def train_one_epoch(model: torch.nn.Module,
@@ -44,6 +47,15 @@ def train_one_epoch(model: torch.nn.Module,
 
         samples = samples.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True) if masks is not None else None
+        
+        #Print samples et mask if batch size=1 TO DELETE
+        #plt.imshow(samples.squeeze(0).cpu().permute(1,2,0).numpy())
+        #plt.axis('off')
+        #plt.show()
+        
+        #plt.imshow(masks.squeeze(0).cpu().permute(1,2,0).numpy())
+        #plt.axis('off')
+        #plt.show() 
 
         with torch.cuda.amp.autocast():
             # Always pass the mask to the model, let the model handle None masks internally
@@ -82,3 +94,62 @@ def train_one_epoch(model: torch.nn.Module,
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+
+@torch.no_grad()
+def evaluate_reconstruction(data_loader, model, device, num_samples=5):
+    """
+    Evaluate the reconstruction quality of a pretrained MAE model.
+    """
+    metric_logger = misc.MetricLogger(delimiter="  ")
+    model.eval()
+
+    total_mse, total_psnr, total_ssim = 0, 0, 0
+    num_images = 0
+
+    for batch_idx, (images, masks) in enumerate(data_loader):
+        images = images.to(device)
+        masks = masks.to(device)
+
+        # Forward pass through the model
+        loss, pred, mask = model(images, masks)
+        reconstructed = model.unpatchify(pred)  # Reconstruct images
+        
+        # **Ensure Shape Compatibility**
+        images_np = images.cpu().numpy()
+        reconstructed_np = reconstructed.cpu().numpy()
+
+        # Compute Reconstruction Metrics
+        mse_loss = F.mse_loss(reconstructed, images)
+        psnr = 10 * torch.log10(1 / mse_loss)
+        
+        # **Fix SSIM Calculation**
+        try:
+            ssim_val = ssim(
+                images_np.transpose(0, 2, 3, 1),  # Convert (B, C, H, W) -> (B, H, W, C)
+                reconstructed_np.transpose(0, 2, 3, 1),
+                data_range=1,
+                channel_axis=-1,  # Ensure multichannel works
+                win_size=5  # Smaller window to avoid "win_size exceeds image extent"
+            )
+        except ValueError as e:
+            print(f"SSIM Computation Error: {e}")
+            ssim_val = 0  # Assign zero if SSIM fails
+        
+        total_mse += mse_loss.item()
+        total_psnr += psnr.item()
+        total_ssim += ssim_val
+        num_images += 1
+
+        # Show first few reconstructions
+        #if batch_idx < num_samples:
+        #    visualize_reconstruction(images, reconstructed, mask, batch_idx)
+
+    # Print final evaluation scores
+    print(f"Reconstruction Metrics - MSE: {total_mse / num_images:.4f}, PSNR: {total_psnr / num_images:.2f}, SSIM: {total_ssim / num_images:.4f}")
+
+    return {
+        "mse": total_mse / num_images,
+        "psnr": total_psnr / num_images,
+        "ssim": total_ssim / num_images
+    }

@@ -176,5 +176,9 @@ This PT/GPU code produces *better* results for ViT-L/H (see the table below). Th
 </tr>
 </tbody></table>
 
+
+### Start fintuning a pretrained model
+python main_finetune.py --model vit_base_patch16 --data_path ../../data/images/2vsall_bl_2/ --finetune ./output_dir/pretrain_railsem1/checkpoint-last.pth --batch_size 16 --num_workers 3 --cls_token --nb_classes 2 --output_dir finetune/finetune_testold/ --epochs 500
+
 ### Evaluate model with the confusion matrix 
 python main_finetune.py --eval --resume finetune/finetune_railsem4_balanced_10000/best_model.pth --model vit_base_patch16 --batch_size 16 --data_path ../../data/images/2vsall_bl_2/ --cls_token --nb_classes 2

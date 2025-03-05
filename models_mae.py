@@ -155,13 +155,13 @@ class MaskedAutoencoderViT(nn.Module):
         """
         N, L, D = x.shape  # batch size, sequence length, embedding dimension
         num_patches = int(L**0.5)  # Assuming square grid of patches
-
+        #visualize_patch_mask(mask.squeeze(0).flatten(1))# Visualize the mask before patch
         # Step 1: Convert mask to patch level
         if mask is not None:
-            mask = F.interpolate(mask, size=(num_patches, num_patches), mode='nearest')  # Resize to patch level
+            mask = F.interpolate(mask, size=(num_patches, num_patches), mode='area')  # Resize to patch level
             mask = mask.squeeze(1).flatten(1)  # [B, L]
-            mask_counts = mask.sum(dim=1)  # Total masked pixels per sample
-            #print(mask_counts)
+            mask_counts = (mask>0).float().sum(dim=1)  # Total masked pixels per sample
+
         else:
             mask_counts = torch.zeros(N, device=x.device)
 
@@ -172,12 +172,14 @@ class MaskedAutoencoderViT(nn.Module):
         noise = torch.rand(N, L, device=x.device)  # Random noise for all patches
 
         for i in range (noise.shape[0]):
-            if mask_counts[i]>1:
+            if mask_counts[i]>=1:
                 # Increase noise for patches with more masked pixels (higher chance to mask)
-                patch_probs = mask[i] / 255.0  # Normalize mask values to [0, 1]
-                noise[i] = noise[i] + patch_probs  # Adjust noise
+                #Normalize the mask
+                patch_probs = (mask[i] - mask[i].min()) / (mask[i].max() - mask[i].min() + 1e-6)  # Normalize to [0, 1]
+                noise[i] = noise[i] + patch_probs  # Adjust noise with mask
                 # Normalize the adjusted noise for the current sample
                 noise[i] = (noise[i] - noise[i].min()) / (noise[i].max() - noise[i].min() + 1e-6)  # Normalize to [0, 1]
+        #visualize_patch_mask(noise)# Visualize noise
         # Step 4: Sort and select patches
         ids_shuffle = torch.argsort(noise, dim=1)  # Sort noise (lower values = keep)
         ids_restore = torch.argsort(ids_shuffle, dim=1)  # Restore order after masking
@@ -185,11 +187,13 @@ class MaskedAutoencoderViT(nn.Module):
 
         # Step 5: Gather masked patches
         x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, D))
-
+        
         # Step 6: Generate binary mask
         binary_mask = torch.ones([N, L], device=x.device)  # All masked by default
-        binary_mask.scatter_(1, ids_keep, 0)  # Mark kept patches as 0 (unmasked)
-
+        binary_mask.scatter_(1, ids_keep, 0)  # Mark kept patches as 0 (unmasked) Masked are 1
+        
+        #visualize_patch_mask(binary_mask)# Visualize binary mask
+        #time.sleep(60)#sleep for 1 minute
         return x_masked, binary_mask, ids_restore
         
 

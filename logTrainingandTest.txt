@@ -1,0 +1,11 @@
+python main_pretrain.py --eval 
+--resume ./output_dir/pretrain/eurocitynomask/checkpoint-last.pth 
+--model mae_vit_base_patch16 --batch_size 16 --epochs 500 
+--data_path ../../data/eurocity_224/ 
+--output_dir ./output_dir/pretrain/trash1
+
+Found 28114 images.
+[11:46:54.501663] Sampler_train = <torch.utils.data.distributed.DistributedSampler object at 0x7efc14eea490>
+[11:46:54.502599] Number of batches : 1757
+
+

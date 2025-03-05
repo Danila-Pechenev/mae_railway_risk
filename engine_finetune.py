@@ -97,7 +97,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, device):
+def evaluate(data_loader, model, device, compute_conf_matrix=False):
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = misc.MetricLogger(delimiter="  ")
@@ -138,7 +138,9 @@ def evaluate(data_loader, model, device):
     print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
           .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
 
-    conf_matrix = confusion_matrix(all_targets,all_preds)
     results = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-    results['conf_matrix'] = conf_matrix
+    
+    if compute_conf_matrix:
+        conf_matrix = confusion_matrix(all_targets,all_preds)
+        results['conf_matrix'] = conf_matrix
     return results

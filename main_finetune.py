@@ -300,7 +300,7 @@ def main(args):
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     if args.eval:
-        test_stats = evaluate(data_loader_val, model, device)
+        test_stats = evaluate(data_loader_val, model, device,compute_conf_matrix=True)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}% \n")
         print("Confusion Matrix:\n",test_stats['conf_matrix'])
         exit(0)
@@ -321,7 +321,7 @@ def main(args):
             args=args
         )
 
-        test_stats = evaluate(data_loader_val, model, device)
+        test_stats = evaluate(data_loader_val, model, device,compute_conf_matrix=(args.eval))
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         max_accuracy = max(max_accuracy, test_stats["acc1"])
         print(f'Max accuracy: {max_accuracy:.2f}%')
@@ -349,6 +349,11 @@ def main(args):
         if args.output_dir and misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
+                
+            print("DEBUG: Checking log_stats types")
+            for k, v in log_stats.items():
+                print(f"{k}: {type(v)}")  # This will reveal which key has a NumPy array
+
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 

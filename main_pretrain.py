@@ -36,7 +36,7 @@ from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
 import models_mae
 
-from engine_pretrain import train_one_epoch
+from engine_pretrain import train_one_epoch, evaluate_reconstruction
 
 def add_weight_decay(model, weight_decay, skip_list=()):
     decay = []
@@ -68,7 +68,9 @@ class CustomDataset(Dataset):
             for f in files:
                 if f.endswith(('.jpg', '.jpeg', '.png', '.bmp')):
                     self.image_paths.append(os.path.join(root, f))
+        #Sort all images in order
         self.image_paths = sorted(self.image_paths)
+        #random.shuffle(self.image_paths) #Randomize for testing
 
         # Collect matching mask paths if provided
         if mask_dir:
@@ -92,8 +94,8 @@ class CustomDataset(Dataset):
     def __getitem__(self, idx):
         # Load image
         image_path = self.image_paths[idx]
+        #image_path = "../../data/images/2vsall/train/risky/rs02961.jpg" #one image for testing
         image = Image.open(image_path).convert('RGB')
-
         # Load corresponding mask
         image_data = None
         mask = None
@@ -176,6 +178,8 @@ def get_args_parser():
                         help='dataset path')
     parser.add_argument('--mask_path', default=None, type=str,
                         help='masks path (optional)')
+    parser.add_argument('--unsorted_data', action='store_true',
+                        help='Indicates that the data is not sorted into train val test or classes')
 
     parser.add_argument('--output_dir', default='./output_dir',
                         help='path where to save, empty for no saving')
@@ -189,7 +193,9 @@ def get_args_parser():
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
-    parser.add_argument('--num_workers', default=1, type=int)
+    parser.add_argument('--eval', action='store_true',
+                        help='Perform evaluation only')
+    parser.add_argument('--num_workers', default=4, type=int)
     parser.add_argument('--pin_mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
@@ -215,11 +221,12 @@ def main(args):
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
-    seed = args.seed + misc.get_rank()
+    seed = args.seed #+ misc.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    cudnn.benchmark = True
+    cudnn.benchmark = False #DONT FORGET TO CHANGE THIS #True
+    cudnn.deterministic = True #DONT FORGET TO CHANGE THIS #delete it
 
     # simple augmentation
     #transform_train = transforms.Compose([
@@ -238,12 +245,18 @@ def main(args):
     
     # Original dataset_train initialization (commented out)
     #dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
-
+    image_dir_data = None
+    #Deal with unsorted data
+    if args.unsorted_data:
+        image_dir_data = args.data_path
+    else:
+        image_dir_data = os.path.join(args.data_path, 'train')
+    #Create the dataset for training
     dataset_train = CustomDataset(
-        image_dir=os.path.join(args.data_path, 'train'),
-        mask_dir=args.mask_path,
-        transform=transform_train,
-        normalize = normalize_transform
+    image_dir=image_dir_data,
+    mask_dir=args.mask_path,
+    transform=transform_train,
+    normalize = normalize_transform
     )
     #print(dataset_train)
 
@@ -304,6 +317,36 @@ def main(args):
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
+
+    #Eval only
+    #Random mask can be used here
+    if args.eval:
+        #Build val dataloader
+        if args.unsorted_data:
+            image_dir_data = args.data_path
+        else:
+            image_dir_data = os.path.join(args.data_path, 'val')
+        dataset_val = CustomDataset(
+        image_dir=image_dir_data,
+        mask_dir=args.mask_path,
+        transform=transform_train,
+        normalize = normalize_transform
+        )
+        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        
+        data_loader_val = torch.utils.data.DataLoader(
+            dataset_val, sampler=sampler_val,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=False
+        )
+        
+        eval_stats = evaluate_reconstruction(data_loader_val, model, device)
+        print(f"Evaluation Completed:\n{eval_stats}")
+        exit(0)
+
+    
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
