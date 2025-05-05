@@ -170,7 +170,6 @@ class MaskedAutoencoderViT(nn.Module):
 
         # Step 3: Adjust probabilities based on mask
         noise = torch.rand(N, L, device=x.device)  # Random noise for all patches
-
         for i in range (noise.shape[0]):
             if mask_counts[i]>=1:
                 # Increase noise for patches with more masked pixels (higher chance to mask)
@@ -187,18 +186,21 @@ class MaskedAutoencoderViT(nn.Module):
 
         # Step 5: Gather masked patches
         x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, D))
-        
         # Step 6: Generate binary mask
         binary_mask = torch.ones([N, L], device=x.device)  # All masked by default
         binary_mask.scatter_(1, ids_keep, 0)  # Mark kept patches as 0 (unmasked) Masked are 1
-        
         #visualize_patch_mask(binary_mask)# Visualize binary mask
         #time.sleep(60)#sleep for 1 minute
+        #if not self.training:  # If in test mode, restore order immediately
+        #    x_restored = torch.gather(x_masked, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
+        #    ids_restore = torch.arange(L, device=x.device).unsqueeze(0).expand(N, -1)  # Identity mapping
+        #    return x_restored, binary_mask, ids_restore
+        
         return x_masked, binary_mask, ids_restore
         
 
 
-    def forward_encoder(self, x, mask=None, mask_ratio=0.75):
+    def forward_encoder(self, x, mask=None, mask_ratio=0.75,return_attention = False):
         # embed patches
         x = self.patch_embed(x)
 
@@ -213,11 +215,19 @@ class MaskedAutoencoderViT(nn.Module):
         cls_tokens = cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
+        #store the attention map
+        attention_maps = [] if return_attention else None
+         
         # apply Transformer blocks
         for blk in self.blocks:
+            if return_attention:
+                x,attn_weights = blk(x, return_attention=True)
+                attention_maps.append(attn_weights)
             x = blk(x)
         x = self.norm(x)
 
+        if return_attention:
+            return x,mask,ids_restore,attention_maps
         return x, mask, ids_restore
 
     def forward_decoder(self, x, ids_restore):
@@ -264,11 +274,17 @@ class MaskedAutoencoderViT(nn.Module):
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 
-    def forward(self, imgs, mask_input=None, mask_ratio=0.75):
-        latent, mask, ids_restore = self.forward_encoder(imgs,mask_input,mask_ratio)
-        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-        loss = self.forward_loss(imgs, pred, mask)
-        return loss, pred, mask
+    def forward(self, imgs, mask_input=None, mask_ratio=0.75, return_attention=False):
+        if return_attention:
+            latent, mask, ids_restore, attn_maps = self.forward_encoder(imgs,mask_input,mask_ratio,True)
+            pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+            loss = self.forward_loss(imgs, pred, mask)
+            return loss, pred, mask, attn_maps
+        else:
+            latent, mask, ids_restore = self.forward_encoder(imgs,mask_input,mask_ratio)
+            pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+            loss = self.forward_loss(imgs, pred, mask)
+            return loss, pred, mask
 
 
 def mae_vit_base_patch16_dec512d8b(**kwargs):
