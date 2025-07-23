@@ -15,6 +15,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.vision_transformer import PatchEmbed, Block
+from scipy.ndimage import label, center_of_mass
+import scipy
+import numpy as np
 
 import matplotlib.pyplot as plt
 from util.pos_embed import get_2d_sincos_pos_embed
@@ -153,6 +156,8 @@ class MaskedAutoencoderViT(nn.Module):
         Perform per-sample masking influenced by the mask.
         Ensure the number of patches kept aligns with mask_ratio.
         """
+        preserve_object = False
+        use_blob_hint=False
         N, L, D = x.shape  # batch size, sequence length, embedding dimension
         num_patches = int(L**0.5)  # Assuming square grid of patches
         #visualize_patch_mask(mask.squeeze(0).flatten(1))# Visualize the mask before patch
@@ -170,15 +175,46 @@ class MaskedAutoencoderViT(nn.Module):
 
         # Step 3: Adjust probabilities based on mask
         noise = torch.rand(N, L, device=x.device)  # Random noise for all patches
-        for i in range (noise.shape[0]):
-            if mask_counts[i]>=1:
-                # Increase noise for patches with more masked pixels (higher chance to mask)
-                #Normalize the mask
-                patch_probs = (mask[i] - mask[i].min()) / (mask[i].max() - mask[i].min() + 1e-6)  # Normalize to [0, 1]
-                noise[i] = noise[i] + patch_probs  # Adjust noise with mask
-                # Normalize the adjusted noise for the current sample
-                noise[i] = (noise[i] - noise[i].min()) / (noise[i].max() - noise[i].min() + 1e-6)  # Normalize to [0, 1]
+        for i in range(noise.shape[0]):
+            if mask_counts[i] >= 1:
+                # Normalize the patch mask
+                patch_probs = (mask[i] - mask[i].min()) / (mask[i].max() - mask[i].min() + 1e-6)  # [0, 1]
+
+                if preserve_object:
+                    # Lower noise where object is → increase chance of keeping
+                    noise[i] = noise[i] + (1 - patch_probs)
+                else:
+                    # Higher noise where object is → increase chance of masking
+                    noise[i] = noise[i] + patch_probs
+
+                # Normalize adjusted noise
+                noise[i] = (noise[i] - noise[i].min()) / (noise[i].max() - noise[i].min() + 1e-6)
+
+        if use_blob_hint:
+                # --- Blob hint strategy ---
+                mask_np = mask[i].view(num_patches, num_patches).cpu().numpy()
+
+                # Connected components (blobs)
+                labeled, num_features = label(mask_np > 0.5)
+
+                if num_features > 0:
+                    blob_centers = np.array(center_of_mass(mask_np, labeled, range(1, num_features + 1)))
+                    if blob_centers.ndim == 1:
+                        blob_centers = blob_centers.reshape(1, -1)
+
+                    for center_idx in blob_centers:
+                        if len(center_idx) != 2:
+                            continue
+
+                        y, x_idx = int(round(center_idx[0])), int(round(center_idx[1]))
+                        y = min(max(y, 0), num_patches - 1)
+                        x_idx = min(max(x_idx, 0), num_patches - 1)
+                        patch_id = y * num_patches + x_idx
+
+                        # Lower noise to preserve hint patches (higher keep chance)
+                        noise[i, patch_id] -= 1  # Strong hint
         #visualize_patch_mask(noise)# Visualize noise
+        
         # Step 4: Sort and select patches
         ids_shuffle = torch.argsort(noise, dim=1)  # Sort noise (lower values = keep)
         ids_restore = torch.argsort(ids_shuffle, dim=1)  # Restore order after masking
