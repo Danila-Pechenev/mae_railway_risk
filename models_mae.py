@@ -151,13 +151,12 @@ class MaskedAutoencoderViT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], 3, h * p, h * p))
         return imgs
 
-    def random_masking(self, x, mask, mask_ratio):
+    def random_masking(self, x, mask, mask_ratio, preserve_object=False, blob_hint=False):
         """
         Perform per-sample masking influenced by the mask.
         Ensure the number of patches kept aligns with mask_ratio.
         """
-        preserve_object = False
-        use_blob_hint=False
+                
         N, L, D = x.shape  # batch size, sequence length, embedding dimension
         num_patches = int(L**0.5)  # Assuming square grid of patches
         #visualize_patch_mask(mask.squeeze(0).flatten(1))# Visualize the mask before patch
@@ -190,7 +189,7 @@ class MaskedAutoencoderViT(nn.Module):
                 # Normalize adjusted noise
                 noise[i] = (noise[i] - noise[i].min()) / (noise[i].max() - noise[i].min() + 1e-6)
 
-        if use_blob_hint:
+        if blob_hint:
                 # --- Blob hint strategy ---
                 mask_np = mask[i].view(num_patches, num_patches).cpu().numpy()
 
@@ -236,7 +235,7 @@ class MaskedAutoencoderViT(nn.Module):
         
 
 
-    def forward_encoder(self, x, mask=None, mask_ratio=0.75,return_attention = False):
+    def forward_encoder(self, x, mask=None, mask_ratio=0.75,return_attention = False, preserve_object=False, blob_hint=False):
         # embed patches
         x = self.patch_embed(x)
 
@@ -244,7 +243,7 @@ class MaskedAutoencoderViT(nn.Module):
         x = x + self.pos_embed[:, 1:, :]
 
         # masking: length -> length * mask_ratio
-        x, mask, ids_restore = self.random_masking(x, mask, mask_ratio)
+        x, mask, ids_restore = self.random_masking(x, mask, mask_ratio, preserve_object, blob_hint)
 
         # append cls token
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
@@ -310,14 +309,14 @@ class MaskedAutoencoderViT(nn.Module):
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 
-    def forward(self, imgs, mask_input=None, mask_ratio=0.75, return_attention=False):
+    def forward(self, imgs, mask_input=None, mask_ratio=0.75, return_attention=False, preserve_object=False, blob_hint=False):
         if return_attention:
-            latent, mask, ids_restore, attn_maps = self.forward_encoder(imgs,mask_input,mask_ratio,True)
+            latent, mask, ids_restore, attn_maps = self.forward_encoder(imgs,mask_input,mask_ratio,True,preserve_object,blob_hint)
             pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
             loss = self.forward_loss(imgs, pred, mask)
             return loss, pred, mask, attn_maps
         else:
-            latent, mask, ids_restore = self.forward_encoder(imgs,mask_input,mask_ratio)
+            latent, mask, ids_restore = self.forward_encoder(imgs,mask_input,mask_ratio, preserve_object=preserve_object, blob_hint=blob_hint)
             pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
             loss = self.forward_loss(imgs, pred, mask)
             return loss, pred, mask

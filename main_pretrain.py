@@ -74,12 +74,16 @@ class CustomDataset(Dataset):
 
         # Collect matching mask paths if provided
         if mask_dir:
-            print("Mask are used and loaded\n")
+            print("Mask are loaded\n")
             self.mask_paths = {
                 os.path.splitext(f)[0]: os.path.join(mask_dir, f)
                 for root, _, files in os.walk(mask_dir) for f in files
                 if f.endswith(('.jpg', '.jpeg', '.png', '.bmp'))
             }
+            print(len(self.mask_paths))
+            if len(self.mask_paths) == 0 : 
+                print("No mask found, default mask")
+                self.mask_paths = None
         else:
             self.mask_paths = None
 
@@ -154,10 +158,21 @@ def get_args_parser():
 
     parser.add_argument('--mask_ratio', default=0.75, type=float,
                         help='Masking ratio (percentage of removed patches).')
+    
+    parser.add_argument('--mask_importance', default=1.0, type=float,
+                        help='Masking importance (sensitivity of the guidance mask to have an impact on the masking mask).')
 
     parser.add_argument('--norm_pix_loss', action='store_true',
                         help='Use (per-patch) normalized pixels as targets for computing loss')
+    
     parser.set_defaults(norm_pix_loss=False)
+    
+    parser.add_argument('--preserve_object', action='store_true',
+                    help='If set, reduces the chance to mask object of interest (e.g. pedestrian)')
+
+    parser.add_argument('--blob_hint', action='store_true',
+                    help='If set, enables hinting strategy that leaves a patch visible per risk blob')
+
 
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05,
@@ -174,7 +189,7 @@ def get_args_parser():
                         help='epochs to warmup LR')
 
     # Dataset parameters
-    parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
+    parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', required=True, type=str,
                         help='dataset path')
     parser.add_argument('--mask_path', default=None, type=str,
                         help='masks path (optional)')

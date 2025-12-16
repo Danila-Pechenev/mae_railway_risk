@@ -59,7 +59,7 @@ def train_one_epoch(model: torch.nn.Module,
 
         with torch.cuda.amp.autocast():
             # Always pass the mask to the model, let the model handle None masks internally
-            loss, _, _ = model(samples, mask_input=masks, mask_ratio=args.mask_ratio)
+            loss, _, _ = model(samples, mask_input=masks, mask_ratio=args.mask_ratio, preserve_object=args.preserve_object, blob_hint=args.blob_hint)
 
         loss_value = loss.item()
 

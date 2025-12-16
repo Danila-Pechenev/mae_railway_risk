@@ -20,6 +20,8 @@ from pathlib import Path
 import torch
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import ConcatDataset
+
 
 import timm
 
@@ -136,6 +138,8 @@ def get_args_parser():
                         help='start epoch')
     parser.add_argument('--eval', action='store_true',
                         help='Perform evaluation only')
+    parser.add_argument('--ultra_eval', action='store_true',
+                    help='Evaluate on the concatenation of validation and test sets (val + test)')
     parser.add_argument('--dist_eval', action='store_true', default=False,
                         help='Enabling distributed evaluation (recommended during training for faster monitor')
     parser.add_argument('--num_workers', default=10, type=int)
@@ -195,6 +199,32 @@ def main(args):
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
         sampler_test = torch.utils.data.SequentialSampler(dataset_test)
+
+    # === ULTRA: combine val + test ===
+    if args.ultra_eval:
+        dataset_ultra = ConcatDataset([dataset_val, dataset_test])
+
+        # sampler pour ultra
+        if args.dist_eval:
+            if len(dataset_ultra) % num_tasks != 0:
+                print('Warning: Enabling distributed evaluation with an ULTRA dataset not divisible by process number. '
+                    'This will slightly alter evaluation results as extra duplicate entries are added to achieve '
+                    'equal num of samples per-process.')
+            sampler_ultra = torch.utils.data.DistributedSampler(
+                dataset_ultra, num_replicas=num_tasks, rank=global_rank, shuffle=False
+            )
+        else:
+            sampler_ultra = torch.utils.data.SequentialSampler(dataset_ultra)
+
+        data_loader_ultra = torch.utils.data.DataLoader(
+            dataset_ultra, sampler=sampler_ultra,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=False
+        )
+
+
 
     if global_rank == 0 and args.log_dir is not None and not args.eval:
         os.makedirs(args.log_dir, exist_ok=True)
@@ -312,10 +342,21 @@ def main(args):
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     if args.eval:
-        test_stats = evaluate(data_loader_test, model, device,compute_conf_matrix=True)
-        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}% \n")
-        print("Confusion Matrix:\n",test_stats['conf_matrix'])
-        exit(0)
+        if args.ultra_eval:
+            ultra_stats = evaluate(data_loader_ultra, model, device, compute_conf_matrix=True)
+            n_imgs = int(ultra_stats['conf_matrix'].sum()) if 'conf_matrix' in ultra_stats else len(dataset_ultra)
+            print(f"Ultra (val+test) accuracy on {n_imgs} images: {ultra_stats['acc1']:.1f}% \n")
+            if 'conf_matrix' in ultra_stats:
+                print("Confusion Matrix:\n", ultra_stats['conf_matrix'])
+            exit(0)
+        else:
+            test_stats = evaluate(data_loader_test, model, device, compute_conf_matrix=True)
+            n_imgs = int(test_stats['conf_matrix'].sum()) if 'conf_matrix' in test_stats else len(dataset_test)
+            print(f"Accuracy of the network on the {n_imgs} test images: {test_stats['acc1']:.1f}% \n")
+            if 'conf_matrix' in test_stats:
+                print("Confusion Matrix:\n", test_stats['conf_matrix'])
+            exit(0)
+
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
