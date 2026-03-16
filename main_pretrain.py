@@ -187,6 +187,10 @@ def get_args_parser():
 
     parser.add_argument('--warmup_epochs', type=int, default=40, metavar='N',
                         help='epochs to warmup LR')
+    parser.add_argument('--save_freq', default=0, type=int,
+                        help='save numbered checkpoints every N epochs; '
+                             'set to 0 to disable numbered checkpoints; '
+                             'checkpoint-last.pth is still updated after every epoch')
 
     # Dataset parameters
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', required=True, type=str,
@@ -373,10 +377,12 @@ def main(args):
             log_writer=log_writer,
             args=args
         )
-        if args.output_dir and (epoch % 20 == 0 or epoch + 1 == args.epochs):
+        keep_epoch_checkpoint = args.save_freq > 0 and ((epoch + 1) % args.save_freq == 0)
+        if args.output_dir:
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                loss_scaler=loss_scaler, epoch=epoch)
+                loss_scaler=loss_scaler, epoch=epoch, keep_last=True,
+                keep_epoch_checkpoint=keep_epoch_checkpoint)
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      'epoch': epoch,}
