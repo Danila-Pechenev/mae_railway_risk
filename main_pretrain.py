@@ -38,6 +38,28 @@ import models_mae
 
 from engine_pretrain import train_one_epoch, evaluate_reconstruction
 
+SEMANTIC_CLASS_TO_ID = {
+    'road': 0,
+    'sidewalk': 1,
+    'construction': 2,
+    'tram-track': 3,
+    'fence': 4,
+    'pole': 5,
+    'traffic-light': 6,
+    'traffic-sign': 7,
+    'vegetation': 8,
+    'terrain': 9,
+    'sky': 10,
+    'human': 11,
+    'rail-track': 12,
+    'car': 13,
+    'truck': 14,
+    'trackbed': 15,
+    'on-rails': 16,
+    'rail-raised': 17,
+    'rail-embedded': 18,
+}
+
 def add_weight_decay(model, weight_decay, skip_list=()):
     decay = []
     no_decay = []
@@ -54,11 +76,15 @@ def add_weight_decay(model, weight_decay, skip_list=()):
     ]
         
 class CustomDataset(Dataset):
-    # Return an image of size 224,224 
-    # and a mask of size 224,224
-    def __init__(self, image_dir, mask_dir=None, transform=None, normalize = None):
+    # Return an image of size 224,224, an optional masking-guidance map,
+    # and an optional target-class mask used for the reconstruction loss.
+    def __init__(self, image_dir, mask_dir=None, semantic_mask_dir=None,
+                 target_class_ids=None, input_size=224, transform=None, normalize=None):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
+        self.semantic_mask_dir = semantic_mask_dir
+        self.target_class_ids = tuple(target_class_ids or [])
+        self.input_size = input_size
         self.transform = transform
         self.normalize = normalize
 
@@ -73,24 +99,48 @@ class CustomDataset(Dataset):
         #random.shuffle(self.image_paths) #Randomize for testing
 
         # Collect matching mask paths if provided
+        self.mask_paths = self._collect_mask_paths(mask_dir, "guidance masks")
+        self.semantic_mask_paths = self._collect_mask_paths(semantic_mask_dir, "semantic masks")
+
+        # Print findings
+        print(f"Found {len(self.image_paths)} images.")
+        if self.mask_paths:
+            print(f"Found {len(self.mask_paths)} masks.")
+        if self.semantic_mask_paths:
+            print(f"Found {len(self.semantic_mask_paths)} semantic masks.")
+
+    def _collect_mask_paths(self, mask_dir, description):
         if mask_dir:
-            print("Mask are loaded\n")
-            self.mask_paths = {
+            print(f"{description.capitalize()} are loaded\n")
+            mask_paths = {
                 os.path.splitext(f)[0]: os.path.join(mask_dir, f)
                 for root, _, files in os.walk(mask_dir) for f in files
                 if f.endswith(('.jpg', '.jpeg', '.png', '.bmp'))
             }
-            print(len(self.mask_paths))
-            if len(self.mask_paths) == 0 : 
-                print("No mask found, default mask")
-                self.mask_paths = None
-        else:
-            self.mask_paths = None
+            print(len(mask_paths))
+            if len(mask_paths) == 0:
+                print(f"No {description} found, using default zeros")
+                return None
+            return mask_paths
+        return None
 
-        #Print findings
-        print(f"Found {len(self.image_paths)} images.")
-        if self.mask_paths:
-            print(f"Found {len(self.mask_paths)} masks.")
+    def _load_mask(self, mask_paths, image_path, class_ids=None):
+        if not mask_paths:
+            return None
+
+        mask_key = os.path.splitext(os.path.basename(image_path))[0]
+        mask_path = mask_paths.get(mask_key)
+        if not mask_path:
+            return None
+
+        mask = Image.open(mask_path).convert('L')
+        mask = mask.resize((self.input_size, self.input_size), Image.NEAREST)
+        if class_ids is None:
+            return mask
+
+        mask_np = np.array(mask)
+        mask_np = np.isin(mask_np, class_ids).astype(np.uint8) * 255
+        return Image.fromarray(mask_np)
 
     def __len__(self):
         return len(self.image_paths)
@@ -98,19 +148,17 @@ class CustomDataset(Dataset):
     def __getitem__(self, idx):
         # Load image
         image_path = self.image_paths[idx]
-        #image_path = "../../data/images/2vsall/train/risky/rs02961.jpg" #one image for testing
+        # image_path = "../../data/images/2vsall/train/risky/rs02961.jpg" # one image for testing
         image = Image.open(image_path).convert('RGB')
-        # Load corresponding mask
+        # Load corresponding masks
         image_data = None
-        mask = None
+        guidance_mask = None
+        target_mask = None
         
-        #If a mask is given load it
-        if self.mask_paths:
-            mask_key = os.path.splitext(os.path.basename(image_path))[0]
-            mask_path = self.mask_paths.get(mask_key)
-            if mask_path:
-                mask = Image.open(mask_path).convert('L')
-                mask = mask.resize((224,224), Image.NEAREST)
+        guidance_mask = self._load_mask(self.mask_paths, image_path)
+        if self.target_class_ids:
+            target_mask = self._load_mask(
+                self.semantic_mask_paths, image_path, class_ids=self.target_class_ids)
         
         # Apply transforms
         if self.transform:
@@ -120,15 +168,19 @@ class CustomDataset(Dataset):
         else:
             image = to_tensor(image)  # Convert to tensor if no transform is applied
 
-        #If a mask is found and transform is set
-        if mask and self.transform:
-            mask_data = A.ReplayCompose.replay(image_data['replay'],image=np.array(mask))
-            mask = to_tensor(Image.fromarray(mask_data['image']))  # Convert mask to tensor but skip Normalize
-            #mask = mask.repeat(3, 1, 1)  # Repeat channels to match image shape
-            #Image.fromarray(mask_data['image']).show(title="Mask")#Vizualise mask
-            #time.sleep(1000)
+        # If masks are found and transform is set, replay the exact same crop/flip.
+        if guidance_mask is not None and self.transform:
+            guidance_mask_data = A.ReplayCompose.replay(image_data['replay'], image=np.array(guidance_mask))
+            guidance_mask = to_tensor(Image.fromarray(guidance_mask_data['image']))
         else:
-            mask = torch.zeros((1, image.shape[1], image.shape[2]))  # Default zero mask
+            guidance_mask = torch.zeros((1, image.shape[1], image.shape[2]))
+
+        if target_mask is not None and self.transform:
+            target_mask_data = A.ReplayCompose.replay(
+                image_data['replay'], image=image_data['image'], mask=np.array(target_mask))
+            target_mask = to_tensor(Image.fromarray(target_mask_data['mask']))
+        else:
+            target_mask = torch.zeros((1, image.shape[1], image.shape[2]))
 
         #Normalize only the image
         if self.normalize:
@@ -136,8 +188,9 @@ class CustomDataset(Dataset):
 
         #here the returning shape are :
         # image : channel,size,size
-        # mask : 1,size,size
-        return image, mask
+        # guidance_mask : 1,size,size
+        # target_mask : 1,size,size
+        return image, guidance_mask, target_mask
 
 
 
@@ -197,6 +250,20 @@ def get_args_parser():
                         help='dataset path')
     parser.add_argument('--mask_path', default=None, type=str,
                         help='masks path (optional)')
+    parser.add_argument('--semantic_mask_path', default=None, type=str,
+                        help='path to semantic masks used to emphasize reconstruction of selected target classes')
+    parser.add_argument('--target_class', nargs='+', default=None,
+                        choices=list(SEMANTIC_CLASS_TO_ID.keys()),
+                        help='one or more semantic classes to emphasize in the reconstruction loss; '
+                             'specify them as a space-separated list; omit this option to disable '
+                             'target-class emphasis')
+    parser.add_argument('--target_loss_weight', default=1.0, type=float,
+                        help='extra weight applied to masked patches containing any selected target class')
+    parser.add_argument('--target_loss_mode', default='proportional', choices=['binary', 'proportional'],
+                        help='how the combined semantic target mask is converted into patch-level loss weights: '
+                             '"binary" upweights any masked patch containing at least one selected target-class pixel, '
+                             'while "proportional" upweights masked patches in proportion to the fraction of '
+                             'selected target-class pixels they contain')
     parser.add_argument('--unsorted_data', action='store_true',
                         help='Indicates that the data is not sorted into train val test or classes')
 
@@ -233,6 +300,13 @@ def get_args_parser():
 
 def main(args):
     misc.init_distributed_mode(args)
+    if args.save_freq < 0:
+        raise ValueError('--save_freq must be >= 0')
+    args.target_class = list(dict.fromkeys(args.target_class or []))
+    target_class_ids = [SEMANTIC_CLASS_TO_ID[target_class] for target_class in args.target_class]
+    args.target_loss_proportional = args.target_loss_mode == 'proportional'
+    use_target_loss = bool(args.target_class) and args.semantic_mask_path is not None and args.target_loss_weight > 0
+    effective_target_loss_weight = args.target_loss_weight if use_target_loss else 0.0
 
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(', ', ',\n'))
@@ -274,10 +348,32 @@ def main(args):
     dataset_train = CustomDataset(
     image_dir=image_dir_data,
     mask_dir=args.mask_path,
+    semantic_mask_dir=args.semantic_mask_path,
+    target_class_ids=target_class_ids,
+    input_size=args.input_size,
     transform=transform_train,
-    normalize = normalize_transform
+    normalize=normalize_transform
     )
     #print(dataset_train)
+
+    if use_target_loss:
+        print(
+            f"Target reconstruction loss enabled with weight={args.target_loss_weight} "
+            f"for classes={args.target_class} "
+            f"(mode={args.target_loss_mode})"
+        )
+    elif args.target_class and args.semantic_mask_path:
+        print(
+            "Warning: target classes and semantic masks were provided, but target_loss_weight <= 0. "
+            "The training will behave like the baseline loss."
+        )
+    elif args.target_class or args.semantic_mask_path:
+        print(
+            "Warning: target-class emphasis requires both semantic_mask_path and target_class. "
+            "The training will behave like the baseline loss."
+        )
+
+    args.target_loss_weight = effective_target_loss_weight
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
@@ -348,8 +444,11 @@ def main(args):
         dataset_val = CustomDataset(
         image_dir=image_dir_data,
         mask_dir=args.mask_path,
+        semantic_mask_dir=args.semantic_mask_path,
+        target_class_ids=target_class_ids,
+        input_size=args.input_size,
         transform=transform_train,
-        normalize = normalize_transform
+        normalize=normalize_transform
         )
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
         
@@ -361,7 +460,16 @@ def main(args):
             drop_last=False
         )
         
-        eval_stats = evaluate_reconstruction(data_loader_val, model, device)
+        eval_stats = evaluate_reconstruction(
+            data_loader_val,
+            model,
+            device,
+            target_loss_weight=effective_target_loss_weight,
+            target_loss_proportional=args.target_loss_proportional,
+            mask_ratio=args.mask_ratio,
+            preserve_object=args.preserve_object,
+            blob_hint=args.blob_hint,
+        )
         print(f"Evaluation Completed:\n{eval_stats}")
         exit(0)
 
