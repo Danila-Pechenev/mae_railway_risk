@@ -291,7 +291,8 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x
 
-    def forward_loss(self, imgs, pred, mask):
+    def forward_loss(self, imgs, pred, mask, target_loss_mask=None,
+                     target_loss_weight=0.0, target_loss_proportional=True):
         """
         imgs: [N, 3, H, W]
         pred: [N, L, p*p*3]
@@ -306,19 +307,46 @@ class MaskedAutoencoderViT(nn.Module):
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
 
-        loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
+        weights = mask.float()
+        if target_loss_mask is not None and target_loss_weight > 0:
+            num_patches = int(pred.shape[1] ** 0.5)
+            target_patch_mask = F.interpolate(
+                target_loss_mask.float(),
+                size=(num_patches, num_patches),
+                mode='area'
+            )
+            target_patch_mask = target_patch_mask.squeeze(1).flatten(1)
+            if target_loss_proportional:
+                target_patch_mask = target_patch_mask.clamp_(0.0, 1.0)
+            else:
+                target_patch_mask = (target_patch_mask > 0).float()
+            weights = weights * (1.0 + target_loss_weight * target_patch_mask)
+
+        loss = (loss * weights).sum() / weights.sum().clamp_min(1e-6)
         return loss
 
-    def forward(self, imgs, mask_input=None, mask_ratio=0.75, return_attention=False, preserve_object=False, blob_hint=False):
+    def forward(self, imgs, mask_input=None, target_loss_mask=None, target_loss_weight=0.0,
+                target_loss_proportional=True, mask_ratio=0.75, return_attention=False,
+                preserve_object=False, blob_hint=False):
         if return_attention:
             latent, mask, ids_restore, attn_maps = self.forward_encoder(imgs,mask_input,mask_ratio,True,preserve_object,blob_hint)
             pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-            loss = self.forward_loss(imgs, pred, mask)
+            loss = self.forward_loss(
+                imgs, pred, mask,
+                target_loss_mask=target_loss_mask,
+                target_loss_weight=target_loss_weight,
+                target_loss_proportional=target_loss_proportional
+            )
             return loss, pred, mask, attn_maps
         else:
             latent, mask, ids_restore = self.forward_encoder(imgs,mask_input,mask_ratio, preserve_object=preserve_object, blob_hint=blob_hint)
             pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-            loss = self.forward_loss(imgs, pred, mask)
+            loss = self.forward_loss(
+                imgs, pred, mask,
+                target_loss_mask=target_loss_mask,
+                target_loss_weight=target_loss_weight,
+                target_loss_proportional=target_loss_proportional
+            )
             return loss, pred, mask
 
 

@@ -39,7 +39,7 @@ def train_one_epoch(model: torch.nn.Module,
     if log_writer is not None:
         print('log_dir: {}'.format(log_writer.log_dir))
 
-    for data_iter_step, (samples, masks) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for data_iter_step, (samples, masks, target_masks) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
@@ -47,6 +47,7 @@ def train_one_epoch(model: torch.nn.Module,
 
         samples = samples.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True) if masks is not None else None
+        target_masks = target_masks.to(device, non_blocking=True) if target_masks is not None else None
         
         #Print samples et mask if batch size=1 TO DELETE
         #plt.imshow(samples.squeeze(0).cpu().permute(1,2,0).numpy())
@@ -59,7 +60,16 @@ def train_one_epoch(model: torch.nn.Module,
 
         with torch.cuda.amp.autocast():
             # Always pass the mask to the model, let the model handle None masks internally
-            loss, _, _ = model(samples, mask_input=masks, mask_ratio=args.mask_ratio, preserve_object=args.preserve_object, blob_hint=args.blob_hint)
+            loss, _, _ = model(
+                samples,
+                mask_input=masks,
+                target_loss_mask=target_masks,
+                target_loss_weight=args.target_loss_weight,
+                target_loss_proportional=args.target_loss_proportional,
+                mask_ratio=args.mask_ratio,
+                preserve_object=args.preserve_object,
+                blob_hint=args.blob_hint,
+            )
 
         loss_value = loss.item()
 
@@ -97,7 +107,16 @@ def train_one_epoch(model: torch.nn.Module,
 
 
 @torch.no_grad()
-def evaluate_reconstruction(data_loader, model, device, num_samples=5):
+def evaluate_reconstruction(
+        data_loader,
+        model,
+        device,
+        num_samples=5,
+        target_loss_weight=0.0,
+        target_loss_proportional=True,
+        mask_ratio=0.75,
+        preserve_object=False,
+        blob_hint=False):
     """
     Evaluate the reconstruction quality of a pretrained MAE model.
     """
@@ -107,12 +126,22 @@ def evaluate_reconstruction(data_loader, model, device, num_samples=5):
     total_mse, total_psnr, total_ssim = 0, 0, 0
     num_images = 0
 
-    for batch_idx, (images, masks) in enumerate(data_loader):
+    for batch_idx, (images, masks, target_masks) in enumerate(data_loader):
         images = images.to(device)
-        masks = masks.to(device)
+        masks = masks.to(device) if masks is not None else None
+        target_masks = target_masks.to(device) if target_masks is not None else None
 
         # Forward pass through the model
-        loss, pred, mask = model(images, masks)
+        loss, pred, mask = model(
+            images,
+            mask_input=masks,
+            target_loss_mask=target_masks,
+            target_loss_weight=target_loss_weight,
+            target_loss_proportional=target_loss_proportional,
+            mask_ratio=mask_ratio,
+            preserve_object=preserve_object,
+            blob_hint=blob_hint,
+        )
         reconstructed = model.unpatchify(pred)  # Reconstruct images
         
         # **Ensure Shape Compatibility**
