@@ -79,10 +79,11 @@ class CustomDataset(Dataset):
     # Return an image of size 224,224, an optional masking-guidance map,
     # and an optional target-class mask used for the reconstruction loss.
     def __init__(self, image_dir, mask_dir=None, semantic_mask_dir=None,
-                 target_class_ids=None, input_size=224, transform=None, normalize=None):
+                 mask_class_ids=None, target_class_ids=None, input_size=224, transform=None, normalize=None):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
         self.semantic_mask_dir = semantic_mask_dir
+        self.mask_class_ids = tuple(mask_class_ids or [])
         self.target_class_ids = tuple(target_class_ids or [])
         self.input_size = input_size
         self.transform = transform
@@ -153,9 +154,13 @@ class CustomDataset(Dataset):
         # Load corresponding masks
         image_data = None
         guidance_mask = None
+        semantic_guidance_mask = None
         target_mask = None
         
         guidance_mask = self._load_mask(self.mask_paths, image_path)
+        if self.mask_class_ids:
+            semantic_guidance_mask = self._load_mask(
+                self.semantic_mask_paths, image_path, class_ids=self.mask_class_ids)
         if self.target_class_ids:
             target_mask = self._load_mask(
                 self.semantic_mask_paths, image_path, class_ids=self.target_class_ids)
@@ -169,16 +174,31 @@ class CustomDataset(Dataset):
             image = to_tensor(image)  # Convert to tensor if no transform is applied
 
         # If masks are found and transform is set, replay the exact same crop/flip.
-        if guidance_mask is not None and self.transform:
-            guidance_mask_data = A.ReplayCompose.replay(image_data['replay'], image=np.array(guidance_mask))
-            guidance_mask = to_tensor(Image.fromarray(guidance_mask_data['image']))
+        if guidance_mask is not None:
+            if self.transform:
+                guidance_mask_data = A.ReplayCompose.replay(image_data['replay'], image=np.array(guidance_mask))
+                guidance_mask = to_tensor(Image.fromarray(guidance_mask_data['image']))
+            else:
+                guidance_mask = to_tensor(guidance_mask)
         else:
             guidance_mask = torch.zeros((1, image.shape[1], image.shape[2]))
 
-        if target_mask is not None and self.transform:
-            target_mask_data = A.ReplayCompose.replay(
-                image_data['replay'], image=image_data['image'], mask=np.array(target_mask))
-            target_mask = to_tensor(Image.fromarray(target_mask_data['mask']))
+        if semantic_guidance_mask is not None:
+            if self.transform:
+                semantic_guidance_mask_data = A.ReplayCompose.replay(
+                    image_data['replay'], image=image_data['image'], mask=np.array(semantic_guidance_mask))
+                semantic_guidance_mask = to_tensor(Image.fromarray(semantic_guidance_mask_data['mask']))
+            else:
+                semantic_guidance_mask = to_tensor(semantic_guidance_mask)
+            guidance_mask = torch.maximum(guidance_mask, semantic_guidance_mask)
+
+        if target_mask is not None:
+            if self.transform:
+                target_mask_data = A.ReplayCompose.replay(
+                    image_data['replay'], image=image_data['image'], mask=np.array(target_mask))
+                target_mask = to_tensor(Image.fromarray(target_mask_data['mask']))
+            else:
+                target_mask = to_tensor(target_mask)
         else:
             target_mask = torch.zeros((1, image.shape[1], image.shape[2]))
 
@@ -249,9 +269,15 @@ def get_args_parser():
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', required=True, type=str,
                         help='dataset path')
     parser.add_argument('--mask_path', default=None, type=str,
-                        help='masks path (optional)')
+                        help='path to precomputed masking-guidance masks (optional)')
     parser.add_argument('--semantic_mask_path', default=None, type=str,
-                        help='path to semantic masks used to emphasize reconstruction of selected target classes')
+                        help='path to semantic segmentation masks; used when --mask_class and/or '
+                             '--target_class is specified')
+    parser.add_argument('--mask_class', nargs='+', default=None,
+                        choices=list(SEMANTIC_CLASS_TO_ID.keys()),
+                        help='one or more semantic classes to use as masking guidance; '
+                             'specify them as a space-separated list; omit this option to disable '
+                             'class-based masking guidance')
     parser.add_argument('--target_class', nargs='+', default=None,
                         choices=list(SEMANTIC_CLASS_TO_ID.keys()),
                         help='one or more semantic classes to emphasize in the reconstruction loss; '
@@ -302,7 +328,9 @@ def main(args):
     misc.init_distributed_mode(args)
     if args.save_freq < 0:
         raise ValueError('--save_freq must be >= 0')
+    args.mask_class = list(dict.fromkeys(args.mask_class or []))
     args.target_class = list(dict.fromkeys(args.target_class or []))
+    mask_class_ids = [SEMANTIC_CLASS_TO_ID[mask_class] for mask_class in args.mask_class]
     target_class_ids = [SEMANTIC_CLASS_TO_ID[target_class] for target_class in args.target_class]
     args.target_loss_proportional = args.target_loss_mode == 'proportional'
     use_target_loss = bool(args.target_class) and args.semantic_mask_path is not None and args.target_loss_weight > 0
@@ -349,12 +377,23 @@ def main(args):
     image_dir=image_dir_data,
     mask_dir=args.mask_path,
     semantic_mask_dir=args.semantic_mask_path,
+    mask_class_ids=mask_class_ids,
     target_class_ids=target_class_ids,
     input_size=args.input_size,
     transform=transform_train,
     normalize=normalize_transform
     )
     #print(dataset_train)
+
+    if args.mask_class and args.semantic_mask_path:
+        print(f"Semantic masking guidance enabled for classes={args.mask_class}")
+        if args.mask_path:
+            print("Combining semantic masking guidance with mask_path guidance using pixelwise maximum.")
+    elif args.mask_class:
+        print(
+            "Warning: mask_class was provided without semantic_mask_path. "
+            "Class-based masking guidance will be disabled."
+        )
 
     if use_target_loss:
         print(
@@ -445,6 +484,7 @@ def main(args):
         image_dir=image_dir_data,
         mask_dir=args.mask_path,
         semantic_mask_dir=args.semantic_mask_path,
+        mask_class_ids=mask_class_ids,
         target_class_ids=target_class_ids,
         input_size=args.input_size,
         transform=transform_train,
